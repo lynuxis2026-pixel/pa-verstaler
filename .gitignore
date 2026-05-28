@@ -1,0 +1,22 @@
+# API sleutel — NOOIT committen
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Tijdelijke bestanden
+*.pdf
+!.env.example
+test_output.pdf
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude
+.claude/
