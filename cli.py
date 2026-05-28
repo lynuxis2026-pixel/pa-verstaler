@@ -11,7 +11,7 @@ import fitz
 from dotenv import load_dotenv
 
 from pdf_processor import detect_scanned, extract_blocks, reconstruct_pdf
-from translator import BATCH_SIZE, translate_blocks
+from translator import BATCH_SIZE, translate_blocks, translate_blocks_free
 
 
 def main() -> None:
@@ -35,6 +35,11 @@ def main() -> None:
         nargs="?",
         help="Pad naar de uitvoer-PDF (standaard: INVOER_NL.pdf naast het origineel)",
     )
+    parser.add_argument(
+        "--gratis",
+        action="store_true",
+        help="Gebruik gratis Google Vertalen (geen API-sleutel nodig, iets minder nauwkeurig)",
+    )
 
     args = parser.parse_args()
 
@@ -52,11 +57,12 @@ def main() -> None:
     )
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
+    if not args.gratis and not api_key:
         _err(
             "ANTHROPIC_API_KEY niet gevonden.\n"
             "  Maak een .env bestand aan in dezelfde map als pa-verstaler:\n"
-            "  ANTHROPIC_API_KEY=sk-ant-api03-..."
+            "  ANTHROPIC_API_KEY=sk-ant-api03-...\n"
+            "  Of gebruik --gratis voor Google Vertalen (geen sleutel nodig)."
         )
 
     # ── Header ────────────────────────────────────────────────────────────
@@ -64,6 +70,7 @@ def main() -> None:
     print("  📖  PA Verstaler")
     print(f"      Invoer : {input_path.name}")
     print(f"      Uitvoer: {output_path}")
+    print(f"      Methode: {'Google Vertalen (gratis)' if args.gratis else 'Claude AI'}")
     print()
 
     # ── Open & valideer PDF ───────────────────────────────────────────────
@@ -106,9 +113,13 @@ def main() -> None:
             flush=True,
         )
 
-    print(f"  🌍 Vertalen...")
+    method_label = "Google Vertalen (gratis)" if args.gratis else "Claude AI"
+    print(f"  🌍 Vertalen ({method_label})...")
     try:
-        translations = translate_blocks(blocks, api_key, on_batch=on_batch)
+        if args.gratis:
+            translations = translate_blocks_free(blocks, on_batch=on_batch)
+        else:
+            translations = translate_blocks(blocks, api_key, on_batch=on_batch)
     except Exception as e:
         print()
         _err(f"Vertaling mislukt: {e}")

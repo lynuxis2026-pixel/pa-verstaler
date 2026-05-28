@@ -8,7 +8,7 @@ from anthropic import AuthenticationError
 from dotenv import load_dotenv
 
 from pdf_processor import detect_scanned, extract_blocks, reconstruct_pdf
-from translator import BATCH_SIZE, translate_blocks
+from translator import BATCH_SIZE, translate_blocks, translate_blocks_free
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
 
@@ -16,14 +16,8 @@ st.set_page_config(page_title="PA Verstaler", page_icon="📖", layout="centered
 st.title("PA Verstaler 📖")
 st.caption("Vertaalt theologische PDF's van oud Bijbels Engels naar hedendaags Nederlands")
 
-# ── API key check ──────────────────────────────────────────────────────────
+# ── API key (optioneel — alleen nodig voor Claude AI modus) ────────────────
 api_key = os.getenv("ANTHROPIC_API_KEY")
-if not api_key:
-    st.error(
-        "Geen API-sleutel gevonden. Maak een `.env` bestand aan in dezelfde map als `app.py` met:\n\n"
-        "```\nANTHROPIC_API_KEY=sk-ant-api03-...\n```"
-    )
-    st.stop()
 
 # ── File upload ────────────────────────────────────────────────────────────
 uploaded = st.file_uploader("Kies een PDF om te vertalen", type=["pdf"])
@@ -82,13 +76,45 @@ if st.session_state.get("blocks") is None:
 n_pages = st.session_state.n_pages
 n_blocks = st.session_state.n_blocks
 n_batches = max(1, (n_blocks + BATCH_SIZE - 1) // BATCH_SIZE)
-est_min = (n_batches * 8) // 60
-est_max = (n_batches * 15) // 60
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 col1.metric("Pagina's", n_pages)
 col2.metric("Tekstblokken", n_blocks)
-col3.metric("Geschatte tijd", f"{est_min}–{est_max} min" if est_max > 0 else "< 1 min")
+
+st.divider()
+
+# ── Vertaalmethode ─────────────────────────────────────────────────────────
+default_idx = 1 if api_key else 0
+methode = st.radio(
+    "Vertaalmethode",
+    options=["🆓 Gratis (Google Vertalen)", "⭐ Claude AI (betere kwaliteit)"],
+    index=default_idx,
+    help=(
+        "**Gratis**: Google Vertalen — gratis, geen API-sleutel nodig. "
+        "Begrijpt ook archaïsch Engels, maar minder nauwkeurig voor theologische terminologie.\n\n"
+        "**Claude AI**: Beste kwaliteit — kent thee/thou/hath, bewaard theologische vaktermen "
+        "(genade, heiligmaking, verbond…) en past de Statenvertaling-stijl toe. "
+        "Vereist een Anthropic API-sleutel."
+    ),
+)
+gratis = methode.startswith("🆓")
+
+# Geschatte tijd
+if gratis:
+    est_sec = max(30, n_blocks // 2)
+    est_str = f"~{est_sec // 60}m {est_sec % 60}s" if est_sec >= 60 else f"~{est_sec}s"
+    st.caption(f"⏱ Geschatte tijd: {est_str}")
+else:
+    est_min = (n_batches * 8) // 60
+    est_max = (n_batches * 15) // 60
+    est_str = f"{est_min}–{est_max} min" if est_max > 0 else "< 1 min"
+    st.caption(f"⏱ Geschatte tijd: {est_str}")
+    if not api_key:
+        st.error(
+            "Geen API-sleutel gevonden. Maak een `.env` bestand aan in dezelfde map als `app.py` met:\n\n"
+            "```\nANTHROPIC_API_KEY=sk-ant-api03-...\n```\n\n"
+            "Of kies **Gratis (Google Vertalen)** hierboven."
+        )
 
 st.divider()
 
@@ -114,7 +140,8 @@ if st.session_state.get("translation_done") and st.session_state.get("output_pdf
 
 # ── Start translation ──────────────────────────────────────────────────────
 else:
-    if st.button("▶ Start vertaling", type="primary"):
+    start_disabled = (not gratis) and (not api_key)
+    if st.button("▶ Start vertaling", type="primary", disabled=start_disabled):
         progress_bar = st.progress(0.0, text="Vertaling starten...")
         status_text = st.empty()
 
@@ -129,10 +156,15 @@ else:
                 done / total,
                 text=f"Batch {done} van {total} vertaald — nog ~{int(remaining)}s",
             )
-            status_text.caption(f"Verwerkt: {done * BATCH_SIZE} / {n_blocks} blokken")
+            status_text.caption(
+                f"Verwerkt: {min(done * BATCH_SIZE, n_blocks)} / {n_blocks} blokken"
+            )
 
         try:
-            translations = translate_blocks(blocks, api_key, on_batch=on_batch)
+            if gratis:
+                translations = translate_blocks_free(blocks, on_batch=on_batch)
+            else:
+                translations = translate_blocks(blocks, api_key, on_batch=on_batch)
         except AuthenticationError:
             st.error("API-sleutel is ongeldig. Controleer je `.env` bestand.")
             st.stop()

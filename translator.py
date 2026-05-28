@@ -152,3 +152,42 @@ def translate_blocks(
             on_batch(i + 1, len(batches))
 
     return results
+
+
+def translate_blocks_free(
+    blocks: list,
+    on_batch: Optional[Callable[[int, int], None]] = None,
+) -> dict:
+    """Vertaal via gratis Google Translate. Geeft {block_id: vertaalde_tekst} terug."""
+    from deep_translator import GoogleTranslator
+
+    gt = GoogleTranslator(source="en", target="nl")
+    translatable = [b for b in blocks if b.block_type not in ("header", "footer")]
+    n_batches = max(1, (len(translatable) + BATCH_SIZE - 1) // BATCH_SIZE)
+    results = {}
+
+    for i, block in enumerate(translatable):
+        text = block.text.strip()
+        if text:
+            try:
+                if len(text) > 4500:
+                    parts = [text[j : j + 4500] for j in range(0, len(text), 4500)]
+                    results[block.block_id] = " ".join(
+                        gt.translate(p) or p for p in parts
+                    )
+                else:
+                    results[block.block_id] = gt.translate(text) or text
+            except Exception:
+                results[block.block_id] = text
+        else:
+            results[block.block_id] = text
+
+        time.sleep(0.05)  # zachte throttle voor Google Translate
+
+        if on_batch and (i + 1) % BATCH_SIZE == 0:
+            on_batch((i + 1) // BATCH_SIZE, n_batches)
+
+    if on_batch:
+        on_batch(n_batches, n_batches)
+
+    return results
