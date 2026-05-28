@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pa-verstaler"
+version = "1.0.0"
+description = "Vertaalt theologische PDF's van oud Bijbels Engels naar hedendaags Nederlands"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit>=1.40.0",
+    "pymupdf>=1.24.0",
+    "anthropic>=0.90.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+pa-verstaler = "cli:main"
+
+[tool.setuptools]
+py-modules = ["cli", "app", "pdf_processor", "translator"]
