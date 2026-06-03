@@ -1,5 +1,6 @@
-# API sleutel — NOOIT committen
+# API sleutels — NOOIT committen
 .env
+.av_key
 
 # Python
 __pycache__/

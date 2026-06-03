@@ -134,7 +134,16 @@ def translate_blocks(
     on_batch: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
     """Translate a list of TextBlocks. Returns {block_id: translated_text}."""
-    client = Anthropic(api_key=api_key)
+    # Auth Vault: av_sk_ app-key of fallback marker → route via lokale proxy
+    if (
+        api_key == "auth-vault-proxy"
+        or api_key.startswith("av_sk_")
+        or api_key.startswith("sk-ant-oat")
+    ):
+        proxy = os.getenv("AUTH_VAULT_PROXY", "http://localhost:7845")
+        client = Anthropic(api_key=api_key, base_url=proxy)
+    else:
+        client = Anthropic(api_key=api_key)
 
     translatable = [b for b in blocks if b.block_type not in ("header", "footer")]
     batches = [translatable[i : i + BATCH_SIZE] for i in range(0, len(translatable), BATCH_SIZE)]
