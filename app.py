@@ -7,17 +7,23 @@ import streamlit as st
 from anthropic import AuthenticationError
 from dotenv import load_dotenv
 
+from auth import get_api_key, login_wall, show_sidebar
 from pdf_processor import detect_scanned, extract_blocks, reconstruct_pdf
 from translator import BATCH_SIZE, translate_blocks, translate_blocks_free
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
 
 st.set_page_config(page_title="PA Verstaler", page_icon="📖", layout="centered")
+
+# ── Auth0 login + sidebar ──────────────────────────────────────────────────
+login_wall()       # stopt de app als niet ingelogd
+show_sidebar()     # gebruikersinfo + API-sleutelinvoer
+
 st.title("PA Verstaler 📖")
 st.caption("Vertaalt theologische PDF's van oud Bijbels Engels naar hedendaags Nederlands")
 
-# ── API key (optioneel — alleen nodig voor Claude AI modus) ────────────────
-api_key = os.getenv("ANTHROPIC_API_KEY")
+# ── API key (sessie of .env) ───────────────────────────────────────────────
+api_key = get_api_key()
 
 # ── File upload ────────────────────────────────────────────────────────────
 uploaded = st.file_uploader("Kies een PDF om te vertalen", type=["pdf"])
@@ -28,7 +34,7 @@ if not uploaded:
 
 file_id = f"{uploaded.name}_{uploaded.size}"
 
-# Reset state when a new file is uploaded
+# Reset state wanneer een nieuw bestand wordt geüpload
 if st.session_state.get("last_file") != file_id:
     st.session_state.last_file = file_id
     st.session_state.translation_done = False
@@ -36,7 +42,7 @@ if st.session_state.get("last_file") != file_id:
     st.session_state.blocks = None
     st.session_state.pdf_bytes = None
 
-# Parse PDF once, cache result in session state
+# PDF éénmalig parsen, resultaat cachen in session state
 if st.session_state.get("blocks") is None:
     raw_bytes = uploaded.read()
 
@@ -92,9 +98,9 @@ methode = st.radio(
     help=(
         "**Gratis**: Google Vertalen — gratis, geen API-sleutel nodig. "
         "Begrijpt ook archaïsch Engels, maar minder nauwkeurig voor theologische terminologie.\n\n"
-        "**Claude AI**: Beste kwaliteit — kent thee/thou/hath, bewaard theologische vaktermen "
+        "**Claude AI**: Beste kwaliteit — kent thee/thou/hath, bewaart theologische vaktermen "
         "(genade, heiligmaking, verbond…) en past de Statenvertaling-stijl toe. "
-        "Vereist een Anthropic API-sleutel."
+        "Vereist een Anthropic API-sleutel (invoeren via de sidebar)."
     ),
 )
 gratis = methode.startswith("🆓")
@@ -110,15 +116,13 @@ else:
     est_str = f"{est_min}–{est_max} min" if est_max > 0 else "< 1 min"
     st.caption(f"⏱ Geschatte tijd: {est_str}")
     if not api_key:
-        st.error(
-            "Geen API-sleutel gevonden. Maak een `.env` bestand aan in dezelfde map als `app.py` met:\n\n"
-            "```\nANTHROPIC_API_KEY=sk-ant-api03-...\n```\n\n"
-            "Of kies **Gratis (Google Vertalen)** hierboven."
+        st.warning(
+            "⚠️ Voer je Anthropic API-sleutel in via de **sidebar** (links) om Claude AI te gebruiken."
         )
 
 st.divider()
 
-# ── After translation: download ────────────────────────────────────────────
+# ── Vertaling klaar: download ──────────────────────────────────────────────
 if st.session_state.get("translation_done") and st.session_state.get("output_pdf_bytes"):
     elapsed = st.session_state.get("elapsed", 0)
     m, s = int(elapsed // 60), int(elapsed % 60)
@@ -138,7 +142,7 @@ if st.session_state.get("translation_done") and st.session_state.get("output_pdf
             st.session_state.pop(key, None)
         st.rerun()
 
-# ── Start translation ──────────────────────────────────────────────────────
+# ── Start vertaling ────────────────────────────────────────────────────────
 else:
     start_disabled = (not gratis) and (not api_key)
     if st.button("▶ Start vertaling", type="primary", disabled=start_disabled):
@@ -166,7 +170,7 @@ else:
             else:
                 translations = translate_blocks(blocks, api_key, on_batch=on_batch)
         except AuthenticationError:
-            st.error("API-sleutel is ongeldig. Controleer je `.env` bestand.")
+            st.error("API-sleutel is ongeldig. Controleer de sleutel in de sidebar.")
             st.stop()
         except Exception as e:
             st.error(f"Vertaling mislukt: {e}")
