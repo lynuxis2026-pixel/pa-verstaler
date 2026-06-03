@@ -116,6 +116,35 @@ def show_sidebar() -> None:
             _api_key_widget()
 
 
+def _find_key_in_json(data, depth: int = 0) -> str | None:
+    """Zoek recursief naar een Anthropic API-sleutel (sk-ant-...) in een JSON-structuur."""
+    if depth > 6:
+        return None
+    if isinstance(data, str) and data.startswith("sk-"):
+        return data
+    if isinstance(data, dict):
+        # Bekende veldnamen eerst
+        for field in (
+            "ANTHROPIC_API_KEY", "anthropic_api_key", "api_key", "apiKey",
+            "key", "token", "secret", "claude_api_key", "claudeApiKey",
+            "anthropicApiKey", "CLAUDE_API_KEY",
+        ):
+            val = data.get(field)
+            if isinstance(val, str) and val.startswith("sk-"):
+                return val
+        # Dan recursief door alle waarden
+        for val in data.values():
+            result = _find_key_in_json(val, depth + 1)
+            if result:
+                return result
+    if isinstance(data, list):
+        for item in data:
+            result = _find_key_in_json(item, depth + 1)
+            if result:
+                return result
+    return None
+
+
 def _api_key_widget() -> None:
     """JSON-upload of tekst-invoer voor de Anthropic API-sleutel."""
     if st.session_state.get("session_api_key"):
@@ -128,7 +157,7 @@ def _api_key_widget() -> None:
     tab_json, tab_text = st.tabs(["📄 JSON bestand", "✏️ Tekst"])
 
     with tab_json:
-        st.caption('Formaat: `{"ANTHROPIC_API_KEY": "sk-ant-..."}`')
+        st.caption('Elk JSON met een `sk-ant-...` waarde werkt.')
         uploaded = st.file_uploader(
             "Upload credentials JSON",
             type=["json"],
@@ -138,16 +167,15 @@ def _api_key_widget() -> None:
         if uploaded:
             try:
                 data = json.loads(uploaded.read())
-                key = (
-                    data.get("ANTHROPIC_API_KEY")
-                    or data.get("api_key")
-                    or data.get("key")
-                )
-                if key and str(key).startswith("sk-"):
-                    st.session_state.session_api_key = str(key)
+                key = _find_key_in_json(data)
+                if key:
+                    st.session_state.session_api_key = key
                     st.rerun()
                 else:
-                    st.error("Geen geldige sleutel gevonden in JSON.")
+                    st.error(
+                        "Geen API-sleutel gevonden in dit JSON bestand. "
+                        "Gebruik het **Tekst** tabblad en plak de sleutel handmatig."
+                    )
             except Exception as e:
                 st.error(f"Ongeldig JSON: {e}")
 
