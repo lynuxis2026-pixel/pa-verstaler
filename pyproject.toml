@@ -18,4 +18,4 @@ dependencies = [
 pa-verstaler = "cli:main"
 
 [tool.setuptools]
-py-modules = ["cli", "app", "auth", "pdf_processor", "translator"]
+py-modules = ["cli", "app", "auth", "corrections", "pdf_processor", "translator"]

@@ -8,6 +8,7 @@ import streamlit as st
 from anthropic import AuthenticationError
 from dotenv import load_dotenv
 
+import corrections as corr
 from auth import get_api_key, login_wall, show_sidebar
 from pdf_processor import detect_scanned, extract_blocks, reconstruct_pdf
 from translator import BATCH_SIZE, translate_blocks, translate_blocks_free
@@ -22,6 +23,10 @@ show_sidebar()
 
 st.title("PA Verstaler 📖")
 st.caption("Vertaalt theologische PDF's van oud Bijbels Engels naar hedendaags Nederlands")
+
+# ── Laad opgeslagen correcties in sessie (éénmalig) ────────────────────────
+if "corrections" not in st.session_state:
+    st.session_state.corrections = corr.load()
 
 # ── API key ────────────────────────────────────────────────────────────────
 api_key = get_api_key()
@@ -77,10 +82,13 @@ if st.session_state.get("blocks") is None:
 n_pages = st.session_state.n_pages
 n_blocks = st.session_state.n_blocks
 n_batches = max(1, (n_blocks + BATCH_SIZE - 1) // BATCH_SIZE)
+saved_corr = st.session_state.corrections
 
 col1, col2 = st.columns(2)
 col1.metric("Pagina's", n_pages)
 col2.metric("Tekstblokken", n_blocks)
+if saved_corr:
+    st.caption(f"📚 {len(saved_corr)} opgeslagen correcties worden automatisch toegepast")
 
 st.divider()
 
@@ -112,7 +120,7 @@ else:
 
 st.divider()
 
-# ── Vertaling klaar: download + nakijken ───────────────────────────────────
+# ── Vertaling klaar: download + taalcheck ─────────────────────────────────
 if st.session_state.get("translation_done") and st.session_state.get("output_pdf_bytes"):
     elapsed = st.session_state.get("elapsed", 0)
     m, s = int(elapsed // 60), int(elapsed % 60)
@@ -127,10 +135,9 @@ if st.session_state.get("translation_done") and st.session_state.get("output_pdf
         type="primary",
     )
 
-    # ── Taalcheck / correcties ─────────────────────────────────────────────
     st.divider()
     with st.expander("✏️ Taalcheck — vertaling nakijken en corrigeren", expanded=False):
-        _show_review(uploaded.name)
+        _show_taalcheck(uploaded.name)
 
     if st.button("↩ Vertaal een ander bestand"):
         for k in ("last_file", "translation_done", "output_pdf_bytes",
@@ -172,7 +179,10 @@ else:
             st.error(f"Vertaling mislukt: {e}")
             st.stop()
 
-        # Sla vertalingen op in sessie (voor taalcheck / correcties)
+        # Pas opgeslagen correcties toe (automatisch)
+        if st.session_state.corrections:
+            translations = corr.apply(translations, st.session_state.corrections)
+
         st.session_state.translations = translations
 
         status_text.empty()
@@ -190,39 +200,44 @@ else:
         st.rerun()
 
 
-# ── Taalcheck functie ──────────────────────────────────────────────────────
+# ── Taalcheck ──────────────────────────────────────────────────────────────
 
-def _show_review(filename: str) -> None:
-    """Toon de taalcheck-editor: zoek/vervang + blok-voor-blok nakijken."""
+def _show_taalcheck(filename: str) -> None:
+    """Taalcheck: zoek/vervang (met onthouden), blok-editor, correctiebeheer."""
     blocks = st.session_state.get("blocks", [])
     translations: dict = dict(st.session_state.get("translations", {}))
+    saved: dict = dict(st.session_state.corrections)
 
     if not translations:
         st.info("Geen vertalingen beschikbaar.")
         return
 
-    tab_replace, tab_edit = st.tabs(["🔄 Zoeken & vervangen", "📝 Blok nakijken"])
+    tab_replace, tab_edit, tab_manage = st.tabs(
+        ["🔄 Zoeken & vervangen", "📝 Blok nakijken", "📚 Opgeslagen correcties"]
+    )
 
-    # ── Tab 1: Globale zoek/vervang ────────────────────────────────────────
+    # ── Tab 1: Zoek & vervang (met optioneel onthouden) ───────────────────
     with tab_replace:
         st.caption(
-            "Vervang een woord of zin **overal** in het document — "
-            "handig voor consistent theologisch taalgebruik."
+            "Vervang een woord of zin **overal** in het document. "
+            "Vink 'Onthouden' aan om de correctie bij toekomstige vertalingen "
+            "automatisch toe te passen."
         )
         col_a, col_b = st.columns(2)
         with col_a:
-            find_txt = st.text_input(
-                "Zoeken", placeholder="bijv. heiligmaking", key="rv_find"
-            )
+            find_txt = st.text_input("Zoeken", placeholder="bijv. heiligmaking", key="rv_find")
         with col_b:
-            repl_txt = st.text_input(
-                "Vervangen door", placeholder="bijv. heiliging", key="rv_repl"
-            )
+            repl_txt = st.text_input("Vervangen door", placeholder="bijv. heiliging", key="rv_repl")
 
-        # Toon hoeveel keer het woord voorkomt
         if find_txt:
             hits = sum(1 for v in translations.values() if find_txt in v)
-            st.caption(f"💬 Komt voor in **{hits}** blokken")
+            st.caption(f"💬 Komt voor in **{hits}** blokken in dit document")
+
+        onthouden = st.checkbox(
+            "💾 Onthouden — automatisch toepassen bij volgende vertalingen",
+            value=True,
+            key="rv_remember",
+        )
 
         if st.button("Vervang alles en hergeneer PDF", type="primary",
                      disabled=not find_txt, key="rv_go"):
@@ -232,8 +247,17 @@ def _show_review(filename: str) -> None:
                     translations[bid] = translations[bid].replace(find_txt, repl_txt)
                     count += 1
             st.session_state.translations = translations
+
+            if onthouden and find_txt:
+                saved[find_txt] = repl_txt
+                st.session_state.corrections = saved
+                corr.save(saved)
+
             _regenerate_pdf(blocks, translations)
-            st.success(f"✅ {count} blokken bijgewerkt — PDF is hergenereerd")
+            msg = f"✅ {count} blokken bijgewerkt"
+            if onthouden:
+                msg += " · correctie opgeslagen voor volgende keer"
+            st.success(msg)
             st.rerun()
 
     # ── Tab 2: Blok-voor-blok editor ──────────────────────────────────────
@@ -259,66 +283,134 @@ def _show_review(filename: str) -> None:
             lz = zoek.lower()
             translatable = [
                 b for b in translatable
-                if lz in b.text.lower()
-                or lz in translations.get(b.block_id, "").lower()
+                if lz in b.text.lower() or lz in translations.get(b.block_id, "").lower()
             ]
 
         if not translatable:
             st.info("Geen vertaalde blokken gevonden.")
-            return
+        else:
+            page_size = 30
+            n_pgs = max(1, (len(translatable) + page_size - 1) // page_size)
 
-        page_size = 30
-        n_pgs = max(1, (len(translatable) + page_size - 1) // page_size)
+            col_pg, col_tot = st.columns([3, 1])
+            with col_pg:
+                cur_pg = st.number_input(
+                    f"Pagina (1 – {n_pgs})", 1, n_pgs, 1, key="rv_pg"
+                ) - 1
+            with col_tot:
+                st.metric("Blokken", len(translatable))
 
-        col_pg, col_tot = st.columns([3, 1])
-        with col_pg:
-            cur_pg = st.number_input(
-                f"Pagina (1 – {n_pgs})", 1, n_pgs, 1, key="rv_pg"
-            ) - 1
-        with col_tot:
-            st.metric("Blokken", len(translatable))
+            chunk = translatable[cur_pg * page_size: (cur_pg + 1) * page_size]
 
-        chunk = translatable[cur_pg * page_size : (cur_pg + 1) * page_size]
+            rows = [
+                {
+                    "_id": b.block_id,
+                    "Pag.": b.page_num + 1,
+                    "Engels": b.text[:130] + ("…" if len(b.text) > 130 else ""),
+                    "Nederlands": translations.get(b.block_id, b.text),
+                }
+                for b in chunk
+            ]
+            df = pd.DataFrame(rows)
 
-        rows = [
-            {
-                "_id": b.block_id,
-                "Pag.": b.page_num + 1,
-                "Engels": b.text[:130] + ("…" if len(b.text) > 130 else ""),
-                "Nederlands": translations.get(b.block_id, b.text),
-            }
-            for b in chunk
-        ]
-        df = pd.DataFrame(rows)
+            edited = st.data_editor(
+                df,
+                column_config={
+                    "_id": None,
+                    "Pag.": st.column_config.NumberColumn(width="small", disabled=True),
+                    "Engels": st.column_config.TextColumn(
+                        "Engels (origineel)", width="medium", disabled=True
+                    ),
+                    "Nederlands": st.column_config.TextColumn(
+                        "Nederlands (klik om te bewerken)", width="large"
+                    ),
+                },
+                use_container_width=True,
+                height=480,
+                key=f"rv_tbl_{cur_pg}_{zoek}",
+            )
 
-        edited = st.data_editor(
-            df,
-            column_config={
-                "_id": None,
-                "Pag.": st.column_config.NumberColumn(width="small", disabled=True),
-                "Engels": st.column_config.TextColumn(
-                    "Engels (origineel)", width="medium", disabled=True
-                ),
-                "Nederlands": st.column_config.TextColumn(
-                    "Nederlands (klik om te bewerken)", width="large"
-                ),
-            },
-            use_container_width=True,
-            height=480,
-            key=f"rv_tbl_{cur_pg}_{zoek}",
+            if st.button("💾 Opslaan en PDF hergeneren", type="primary", key="rv_save"):
+                for _, row in edited.iterrows():
+                    translations[row["_id"]] = row["Nederlands"]
+                st.session_state.translations = translations
+                _regenerate_pdf(blocks, translations)
+                st.success("✅ PDF bijgewerkt — download opnieuw hierboven")
+                st.rerun()
+
+    # ── Tab 3: Opgeslagen correcties beheren ──────────────────────────────
+    with tab_manage:
+        st.caption(
+            "Alle opgeslagen correcties worden automatisch op elke nieuwe vertaling toegepast. "
+            "Exporteer ze als JSON om ze te bewaren of op een andere computer te gebruiken."
         )
 
-        if st.button(
-            "💾 Wijzigingen opslaan en PDF hergeneren",
-            type="primary",
-            key="rv_save",
-        ):
-            for _, row in edited.iterrows():
-                translations[row["_id"]] = row["Nederlands"]
-            st.session_state.translations = translations
-            _regenerate_pdf(blocks, translations)
-            st.success("✅ PDF bijgewerkt — download opnieuw hierboven")
-            st.rerun()
+        if not saved:
+            st.info("Nog geen correcties opgeslagen. Gebruik 'Zoeken & vervangen' met ✔ Onthouden.")
+        else:
+            st.write(f"**{len(saved)} opgeslagen correcties:**")
+
+            # Toon als bewerkbare tabel
+            corr_rows = [{"Zoeken": k, "Vervangen door": v} for k, v in saved.items()]
+            corr_df = pd.DataFrame(corr_rows)
+            edited_corr = st.data_editor(
+                corr_df,
+                column_config={
+                    "Zoeken": st.column_config.TextColumn(width="medium", disabled=True),
+                    "Vervangen door": st.column_config.TextColumn(width="medium"),
+                },
+                num_rows="dynamic",
+                use_container_width=True,
+                key="corr_table",
+            )
+
+            col_s, col_d = st.columns(2)
+            with col_s:
+                if st.button("💾 Wijzigingen opslaan", key="corr_save"):
+                    new_saved = {
+                        row["Zoeken"]: row["Vervangen door"]
+                        for _, row in edited_corr.iterrows()
+                        if row["Zoeken"] and pd.notna(row["Zoeken"])
+                    }
+                    st.session_state.corrections = new_saved
+                    corr.save(new_saved)
+                    st.success("✅ Correcties opgeslagen")
+                    st.rerun()
+            with col_d:
+                if st.button("🗑 Alles wissen", key="corr_clear"):
+                    st.session_state.corrections = {}
+                    corr.save({})
+                    st.success("Alle correcties gewist")
+                    st.rerun()
+
+        st.divider()
+        # Export / import
+        col_exp, col_imp = st.columns(2)
+        with col_exp:
+            st.download_button(
+                "⬇ Exporteer als JSON",
+                data=corr.to_json(saved),
+                file_name="pa_correcties.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        with col_imp:
+            imp_file = st.file_uploader(
+                "⬆ Importeer JSON",
+                type=["json"],
+                key="corr_import",
+                label_visibility="collapsed",
+            )
+            if imp_file:
+                imported = corr.from_json(imp_file.read().decode("utf-8"))
+                if imported:
+                    merged = {**saved, **imported}
+                    st.session_state.corrections = merged
+                    corr.save(merged)
+                    st.success(f"✅ {len(imported)} correcties geïmporteerd")
+                    st.rerun()
+                else:
+                    st.error("Ongeldig correcties-bestand")
 
 
 def _regenerate_pdf(blocks: list, translations: dict) -> None:

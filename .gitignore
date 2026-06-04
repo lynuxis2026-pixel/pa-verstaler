@@ -2,6 +2,9 @@
 .env
 .av_key
 
+# Gebruikersdata — niet committen
+corrections.json
+
 # Python
 __pycache__/
 *.pyc
