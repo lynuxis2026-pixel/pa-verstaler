@@ -153,6 +153,30 @@ def _map_font(font_name: str, flags: int) -> str:
         return "Times-Roman"
 
 
+def _calc_para_scale(blocks: list[TextBlock], translations: dict) -> float:
+    """Bereken een globale schaalfactor voor alinea-tekst.
+
+    Nederlands is gemiddeld 15–20% langer dan Engels. Door alle alinea's
+    uniform voor te schalen krijg je consistente lettergroottes in het
+    hele document — geen mix van 12pt en 8pt meer.
+
+    Retourneert een factor tussen 0.87 en 1.0.
+    """
+    ratios = []
+    for block in blocks:
+        if block.block_type not in ("paragraph", "footnote"):
+            continue
+        orig = block.text.strip()
+        trans = translations.get(block.block_id, "").strip()
+        if len(orig) > 40 and trans and trans != orig:
+            ratios.append(len(trans) / len(orig))
+    if not ratios:
+        return 1.0
+    avg = sum(ratios) / len(ratios)
+    # Omgekeerd evenredig: 18% langer → start op 1/1.18 ≈ 0.847 → min 0.87
+    return max(round(1.0 / avg, 3), 0.87)
+
+
 def reconstruct_pdf(
     original_doc: fitz.Document,
     blocks: list[TextBlock],
@@ -160,18 +184,25 @@ def reconstruct_pdf(
 ) -> bytes:
     """Rebuild the PDF with translated text.
 
-    Uses PyMuPDF redaction (not just white rectangles) so the original
-    English text is *truly removed* from the PDF — the result is a clean,
-    printable Dutch document with no hidden content underneath.
+    Drie-staps aanpak per pagina:
+    1. Redacteer originele Engelse tekst (permanent verwijderd, geen wit vakje)
+    2. Bereken globale schaalfactor voor consistente lettergroottes
+    3. Voeg Nederlandse tekst in op exact dezelfde positie
+
+    Resultaat: drukklaar boek — zelfde opmaak, zelfde layout, zelfde afbeeldingen.
     """
     new_doc = fitz.open()
     new_doc.insert_pdf(original_doc)
+
+    # ── Globale schaal voor consistente lettergroottes ─────────────────────
+    # Voorkomt dat block A 12pt heeft en block B 8pt door overflow-reductie.
+    para_scale = _calc_para_scale(blocks, translations)
 
     for page_num in range(len(new_doc)):
         page = new_doc[page_num]
         page_blocks = [b for b in blocks if b.page_num == page_num]
 
-        # Collect blocks that actually changed
+        # Alleen blokken die echt veranderd zijn
         to_replace = []
         for block in page_blocks:
             translated = translations.get(block.block_id, block.text)
@@ -181,35 +212,41 @@ def reconstruct_pdf(
         if not to_replace:
             continue
 
-        # ── Pass 1: mark all areas for redaction ──────────────────────────
+        # ── Pass 1: markeer gebieden voor redactie ────────────────────────
         for block, _ in to_replace:
-            # fill=(1,1,1) = white background after redaction
             page.add_redact_annot(fitz.Rect(block.bbox), fill=(1, 1, 1))
 
-        # ── Pass 2: apply redactions — original text is permanently removed ─
-        # images=0 and graphics=0 → leave images and vector drawings untouched
+        # ── Pass 2: verwijder originele tekst permanent ───────────────────
         page.apply_redactions(images=_REDACT_LEAVE, graphics=_REDACT_LEAVE)
 
-        # ── Pass 3: insert translated text in the now-clean white areas ────
+        # ── Pass 3: voeg vertaling in met consistente lettergrootte ───────
         for block, translated in to_replace:
             bbox = fitz.Rect(block.bbox)
             fontname = _map_font(block.font, block.flags)
-            fontsize = block.fontsize
 
-            # Reduce font size if Dutch text is longer and overflows the bbox
-            while fontsize >= 7:
+            # Koppen: originele grootte bewaren (titels mogen opvallen)
+            # Alinea's en voetnoten: uniform voorgescaald voor consistentie
+            if block.block_type in ("paragraph", "footnote"):
+                fontsize = round(block.fontsize * para_scale, 1)
+                min_size = max(block.fontsize * 0.82, 8.0)
+            else:
+                fontsize = block.fontsize
+                min_size = max(block.fontsize * 0.85, 9.0)
+
+            # Fijn-granulaire overflow-reductie (0.5pt stappen)
+            while fontsize >= min_size:
                 result = page.insert_textbox(
                     bbox,
                     translated,
                     fontname=fontname,
                     fontsize=fontsize,
                     color=(0, 0, 0),
-                    align=block.alignment,   # preserves heading centering etc.
+                    align=block.alignment,
                     overlay=True,
                 )
                 if result >= 0:
                     break
-                fontsize -= 1.5
+                fontsize -= 0.5
 
     output = new_doc.tobytes(deflate=True)
     new_doc.close()
