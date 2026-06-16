@@ -148,15 +148,24 @@ def translate_blocks(
         proxy = os.getenv("AUTH_VAULT_PROXY", "http://localhost:7845")
         client = Anthropic(api_key=api_key, auth_token=None, base_url=proxy)
     elif api_key.startswith("sk-ant-oat"):
-        # OAuth token (Claude Max): via Auth Vault als die draait, anders direct
+        # OAuth token (Claude Max): check of Auth Vault draait én klaar is
         proxy = os.getenv("AUTH_VAULT_PROXY", "http://localhost:7845")
+        vault_ready = False
         try:
             import httpx as _httpx
-            _httpx.get(proxy + "/", timeout=0.5).raise_for_status()
-            client = Anthropic(api_key=api_key, auth_token=None, base_url=proxy)
+            r = _httpx.get(proxy + "/", timeout=0.5)
+            if r.is_success:
+                data = r.json()
+                info = data.get("anthropic") or data.get("proxy") or {}
+                vault_ready = bool(info.get("ready") or info.get("configured"))
         except Exception:
-            # Auth Vault niet actief — gebruik direct als bearer token
-            client = Anthropic(api_key="oauth2-token", auth_token=api_key)
+            pass
+
+        if vault_ready:
+            client = Anthropic(api_key=api_key, auth_token=None, base_url=proxy)
+        else:
+            # Auth Vault niet actief/klaar — stuur bearer token direct naar Anthropic
+            client = Anthropic(auth_token=api_key)
     else:
         client = Anthropic(api_key=api_key, auth_token=None)
 
