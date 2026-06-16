@@ -2,7 +2,6 @@
 
 Correcties worden opgeslagen in corrections.json naast de app.
 Ze worden automatisch toegepast na elke vertaling.
-Op Render (read-only filesystem) is opslaan stil gefaald — gebruik dan export/import.
 """
 import json
 from pathlib import Path
