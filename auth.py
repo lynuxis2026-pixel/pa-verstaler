@@ -1,10 +1,14 @@
 """Auth0 login-bescherming en API-sleutel beheer voor PA Verstaler."""
 import json
 import os
+import time
 from pathlib import Path
 
 import httpx
 import streamlit as st
+
+# Claude Code sloeg zijn OAuth-token op in ~/.claude/.credentials.json
+_CLAUDE_CREDS = Path.home() / ".claude" / ".credentials.json"
 
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "")
 AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "")
@@ -17,8 +21,26 @@ AUTH_VAULT_MARKER = "auth-vault-proxy"  # fallback marker als geen av_sk_ beschi
 _AV_KEY_FILE = Path(__file__).resolve().parent / ".av_key"  # gecachete app-key
 
 
+def _read_oat_token() -> str | None:
+    """Lees Claude Max OAuth token automatisch uit ~/.claude/.credentials.json.
+
+    Werkt zonder Auth Vault of API-sleutel — zolang Claude Code actief is
+    op deze machine is het token aanwezig en geldig.
+    """
+    try:
+        data = json.loads(_CLAUDE_CREDS.read_text("utf-8"))
+        oat = data.get("claudeAiOauth", {})
+        token = oat.get("accessToken", "")
+        expires_ms = oat.get("expiresAt", 0)
+        if token.startswith("sk-") and expires_ms > time.time() * 1000:
+            return token
+    except Exception:
+        pass
+    return None
+
+
 def _check_auth_vault() -> dict | None:
-    """Detecteer of Auth Vault draait en of er een API-sleutel is geconfigureerd.
+    """Detecteer of Auth Vault draait en of de Anthropic-kant is geconfigureerd.
 
     Returns:
         dict met {'configured': bool, 'maskedKey': str} of None als niet bereikbaar.
@@ -26,7 +48,12 @@ def _check_auth_vault() -> dict | None:
     try:
         r = httpx.get(f"{AUTH_VAULT_URL}/", timeout=0.8)
         if r.is_success:
-            return r.json().get("proxy")
+            data = r.json()
+            # v1.3+ heeft per-service blokken (anthropic, openai)
+            if "anthropic" in data:
+                return data["anthropic"]
+            # v1.0-1.2 fallback
+            return data.get("proxy")
     except Exception:
         pass
     return None
@@ -144,18 +171,19 @@ def _auth_vault_widget() -> None:
     if info is None:
         return  # Auth Vault niet bereikbaar — verberg helemaal
 
-    if info.get("configured"):
-        masked = info.get("maskedKey", "")
-        st.success(f"🔌 **Auth Vault verbonden**\n\nSleutel: `{masked}`")
-        st.caption("De vertaler gebruikt automatisch de sleutel uit Auth Vault.")
+    is_ready = info.get("ready", info.get("configured", False))
+    if is_ready:
+        source = info.get("source", "")
+        st.success(f"🔌 **Auth Vault verbonden**\n\n{source or 'Bridge actief'}")
+        st.caption("De vertaler vraagt automatisch een app-key op via Auth Vault.")
         if st.button("Sleutel handmatig invoeren in plaats daarvan", key="bypass_av", use_container_width=True):
             st.session_state["bypass_auth_vault"] = True
             st.rerun()
         st.divider()
     else:
         st.warning(
-            "🔌 **Auth Vault draait**, maar er is nog geen API-sleutel ingesteld.\n\n"
-            "Klik in Auth Vault op **🔑 API Key** om je `sk-ant-api03-...` op te slaan."
+            "🔌 **Auth Vault draait**, maar de Anthropic bridge is niet actief.\n\n"
+            "Log in via Auth Vault → **Login → Claude** om je Max-token op te halen."
         )
         st.divider()
 
@@ -197,6 +225,17 @@ def _find_key_in_json(data, depth: int = 0) -> str | None:
 
 def _api_key_widget() -> None:
     """JSON-upload of tekst-invoer voor de Anthropic API-sleutel."""
+    # Auto-gedetecteerd Claude Code login — geen handmatig invoer nodig
+    if not st.session_state.get("bypass_oat") and not _check_auth_vault():
+        oat = _read_oat_token()
+        if oat:
+            tier = "Claude Max" if "oat01" in oat else "Claude"
+            st.success(f"✅ **{tier} — automatisch ingelogd**\n\nJe Claude Code-aanmelding wordt gebruikt.")
+            if st.button("Andere sleutel gebruiken", key="bypass_oat_btn", use_container_width=True):
+                st.session_state["bypass_oat"] = True
+                st.rerun()
+            return
+
     if st.session_state.get("session_api_key"):
         st.success("✅ Sleutel actief")
         if st.button("🗑 Verwijderen", key="remove_api_key", use_container_width=True):
@@ -253,40 +292,29 @@ def _get_or_create_vault_key() -> str:
     De sleutel wordt lokaal gecacht in .av_key zodat er niet bij elke start
     een nieuwe key aangemaakt wordt.
     """
-    # 1. Lokaal gecacht
+    # 1. Lokaal gecacht (accepteer beide formats: sk-ant-av01- en legacy av_sk_)
     if _AV_KEY_FILE.exists():
         key = _AV_KEY_FILE.read_text().strip()
-        if key.startswith("av_sk_"):
+        if key.startswith("sk-ant-av01-") or key.startswith("av_sk_"):
             return key
 
-    # 2. Maak een nieuwe app-key aan via Auth Vault
+    # 2. Maak een nieuwe Anthropic app-key aan via Auth Vault
     try:
         r = httpx.post(
             f"{AUTH_VAULT_URL}/api/app-keys",
-            json={"name": "pa-verstaler"},
+            json={"name": "pa-verstaler", "service": "anthropic"},
             timeout=5,
         )
         if r.is_success:
             data = r.json()
-            # Zoek de av_sk_ waarde in de response (ongeacht veldnaam)
-            key = None
-            for field in ("key", "apiKey", "api_key", "value", "secret", "token"):
-                val = data.get(field, "")
-                if isinstance(val, str) and val.startswith("av_sk_"):
-                    key = val
-                    break
-            if not key:
-                for val in data.values():
-                    if isinstance(val, str) and val.startswith("av_sk_"):
-                        key = val
-                        break
-            if key:
+            key = data.get("key", "")
+            if isinstance(key, str) and (key.startswith("sk-ant-av01-") or key.startswith("av_sk_")):
                 _AV_KEY_FILE.write_text(key)
                 return key
     except Exception:
         pass
 
-    # 3. Fallback: marker — proxy injecteert OAuth token ook zonder app-key
+    # 3. Fallback: marker (werkt alleen als proxy geen registry-validatie doet)
     return AUTH_VAULT_MARKER
 
 
@@ -297,13 +325,21 @@ def get_api_key() -> str:
 
     Volgorde:
     1. Auth Vault av_sk_ key (proxy op localhost:7845) — tenzij bypassed
-    2. Sessie (handmatig ingevoerde sleutel)
-    3. ANTHROPIC_API_KEY env var
+    2. Claude Code OAuth token uit ~/.claude/.credentials.json (auto-gedetecteerd)
+    3. Sessie (handmatig ingevoerde sleutel)
+    4. ANTHROPIC_API_KEY env var
     """
     if not st.session_state.get("bypass_auth_vault"):
         info = _check_auth_vault()
-        if info and info.get("configured"):
+        is_ready = info and (info.get("ready", False) or info.get("configured", False))
+        if is_ready:
             return _get_or_create_vault_key()
+
+    # Auto-detecteer Claude Code login (sk-ant-oat01-... token)
+    if not st.session_state.get("bypass_oat"):
+        oat = _read_oat_token()
+        if oat:
+            return oat
 
     return (
         st.session_state.get("session_api_key")

@@ -135,16 +135,30 @@ def translate_blocks(
     on_batch: Optional[Callable[[int, int], None]] = None,
 ) -> dict:
     """Translate a list of TextBlocks. Returns {block_id: translated_text}."""
-    # Auth Vault: av_sk_ app-key of fallback marker → route via lokale proxy
+    # Auth Vault: app-key (sk-ant-av01-... of legacy av_sk_) of OAuth token → proxy
+    # Negeer een lege ANTHROPIC_AUTH_TOKEN env-var (anders stuurt SDK "Bearer " en faalt httpx)
+    if os.environ.get("ANTHROPIC_AUTH_TOKEN") == "":
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+
     if (
         api_key == "auth-vault-proxy"
+        or api_key.startswith("sk-ant-av01-")
         or api_key.startswith("av_sk_")
-        or api_key.startswith("sk-ant-oat")
     ):
         proxy = os.getenv("AUTH_VAULT_PROXY", "http://localhost:7845")
-        client = Anthropic(api_key=api_key, base_url=proxy)
+        client = Anthropic(api_key=api_key, auth_token=None, base_url=proxy)
+    elif api_key.startswith("sk-ant-oat"):
+        # OAuth token (Claude Max): via Auth Vault als die draait, anders direct
+        proxy = os.getenv("AUTH_VAULT_PROXY", "http://localhost:7845")
+        try:
+            import httpx as _httpx
+            _httpx.get(proxy + "/", timeout=0.5).raise_for_status()
+            client = Anthropic(api_key=api_key, auth_token=None, base_url=proxy)
+        except Exception:
+            # Auth Vault niet actief — gebruik direct als bearer token
+            client = Anthropic(api_key="oauth2-token", auth_token=api_key)
     else:
-        client = Anthropic(api_key=api_key)
+        client = Anthropic(api_key=api_key, auth_token=None)
 
     translatable = [b for b in blocks if b.block_type not in ("header", "footer")]
     batches = [translatable[i : i + BATCH_SIZE] for i in range(0, len(translatable), BATCH_SIZE)]
